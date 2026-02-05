@@ -989,6 +989,11 @@ def main() -> int:
         description="Export Claude Code sessions to structured directories"
     )
     parser.add_argument(
+        "--file",
+        dest="file_path",
+        help="Export from an arbitrary JSONL trace file (bypasses ~/.claude lookup)",
+    )
+    parser.add_argument(
         "--session",
         dest="session_id",
         help="Export a specific session ID (supports prefix match)",
@@ -1021,14 +1026,63 @@ def main() -> int:
 
     args = parser.parse_args()
     cwd = os.getcwd()
+    output_dir = Path(args.output_dir) if args.output_dir else None
 
+    # Handle arbitrary file input
+    if args.file_path:
+        file_path = Path(args.file_path)
+        if not file_path.exists():
+            print(f"File not found: {file_path}")
+            return 1
+
+        # Extract session_id from first line of JSONL
+        session_id = file_path.stem
+        project_path = cwd
+        with open(file_path, "r", encoding="utf-8") as f:
+            first_line = f.readline()
+            if first_line:
+                try:
+                    data = json.loads(first_line)
+                    if "sessionId" in data:
+                        session_id = data["sessionId"]
+                    if "cwd" in data:
+                        project_path = data["cwd"]
+                except json.JSONDecodeError:
+                    pass
+
+        session_info = {
+            "path": file_path,
+            "mtime": file_path.stat().st_mtime,
+            "session_id": session_id,
+        }
+        export_name = args.export_name or file_path.stem
+
+        print(f"Exporting trace file: {file_path.name}")
+        try:
+            export_path, manifest = export_session(
+                session_info,
+                project_path,
+                export_name,
+                output_dir=output_dir,
+                output_format=args.format,
+                anonymized=args.anonymize,
+            )
+            print_export_summary(export_path, manifest)
+            out_location = output_dir or Path(cwd) / ".claude-sessions"
+            print(f"\nExported to {out_location / export_name}")
+            return 0
+        except Exception as e:
+            print(f"Export failed: {e}")
+            return 1
+
+    # Standard project session discovery
     sessions = find_project_sessions(cwd)
 
     if not sessions:
         print(
             "No Claude Code sessions found for this project.\n"
             "Make sure you're running this from a project directory "
-            "with Claude Code session history."
+            "with Claude Code session history, or use --file to specify a trace file."
         )
         return 1
 
@@ -1048,8 +1102,6 @@ def main() -> int:
         sessions_to_export = sessions[: args.latest]
     else:
         sessions_to_export = sessions
-
-    output_dir = Path(args.output_dir) if args.output_dir else None
 
     print(f"Exporting {len(sessions_to_export)} session(s)...\n")
 
