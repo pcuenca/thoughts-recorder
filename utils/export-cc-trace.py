@@ -628,20 +628,222 @@ def generate_manifest(
 
 
 # ---------------------------------------------------------------------------
-# Rendered markdown
+# Rendered markdown – turn-based grouping
 # ---------------------------------------------------------------------------
+
+
+def _compact_tool_input(name: str, tool_input: dict) -> str:
+    """Extract the key parameter from a tool input for a compact summary."""
+    if name in ("Read", "Write", "Edit"):
+        return tool_input.get("file_path", "")
+    if name == "Glob":
+        s = tool_input.get("pattern", "")
+        if tool_input.get("path"):
+            s += f" in {tool_input['path']}"
+        return s
+    if name == "Grep":
+        s = tool_input.get("pattern", "")
+        if tool_input.get("path"):
+            s += f" in {tool_input['path']}"
+        return s
+    if name == "Bash":
+        cmd = tool_input.get("command", "")
+        return cmd[:120] + ("…" if len(cmd) > 120 else "")
+    if name == "WebFetch":
+        return tool_input.get("url", "")
+    if name == "WebSearch":
+        return tool_input.get("query", "")
+    if name == "Task":
+        return tool_input.get("description", "")
+    # Fallback: first string value
+    for v in tool_input.values():
+        if isinstance(v, str) and v:
+            return v[:120]
+    return ""
+
+
+def _is_real_user_message(data: dict) -> bool:
+    """A real user message starts a new turn (not a tool_result relay)."""
+    msg = data.get("message", {})
+    if msg.get("role") != "user":
+        return False
+    content = msg.get("content")
+    if isinstance(content, str):
+        return True
+    if isinstance(content, list):
+        types = {b.get("type") for b in content if isinstance(b, dict)}
+        if "tool_result" not in types and "text" in types:
+            return True
+    return False
+
+
+def _extract_user_text(data: dict) -> str:
+    """Extract display text from a real user message."""
+    msg = data["message"]
+    content = msg.get("content", "")
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for block in content:
+            if isinstance(block, dict) and block.get("type") == "text":
+                parts.append(block.get("text", ""))
+        return "\n".join(parts)
+    return str(content)
+
+
+def _render_tool_group(tool_pairs: list[tuple[dict, str | None]], lines: list[str]) -> None:
+    """Render a consecutive sequence of tool_use+tool_result pairs as a collapsed group."""
+    # Build summary line: "Tool Activity — 3 calls: Read, Glob, Bash × 2"
+    from collections import Counter
+
+    names = [pair[0].get("name", "unknown") for pair in tool_pairs]
+    counts = Counter(names)
+    parts = []
+    for name, count in counts.items():
+        parts.append(f"{name} \u00d7 {count}" if count > 1 else name)
+    summary = f"Tool Activity \u2014 {len(tool_pairs)} call{'s' if len(tool_pairs) != 1 else ''}: {', '.join(parts)}"
+
+    lines.append("")
+    lines.append("<details>")
+    lines.append(f"<summary>{summary}</summary>")
+    lines.append("")
+
+    for tool_use_block, result_text in tool_pairs:
+        tool_name = tool_use_block.get("name", "unknown")
+        tool_input = tool_use_block.get("input", {})
+        compact = _compact_tool_input(tool_name, tool_input)
+        if compact:
+            lines.append(f"**{tool_name}** — `{compact}`")
+        else:
+            lines.append(f"**{tool_name}**")
+        lines.append("")
+        if result_text is not None:
+            display = result_text[:5000]
+            if len(result_text) > 5000:
+                display += f"\n... (truncated, {len(result_text) - 5000} chars omitted)"
+            fence = _backtick_fence(display)
+            lines.append(fence)
+            lines.append(display)
+            lines.append(fence)
+            lines.append("")
+
+    lines.append("</details>")
+    lines.append("")
+
+
+def _group_into_turns(messages: list[dict]) -> list[dict]:
+    """Split messages into turns, each starting with a real user message.
+
+    Returns a list of dicts:
+      {"user": data, "items": [data, ...]}
+    where items are assistant/tool_result messages following the user message.
+    """
+    turns: list[dict] = []
+    current: dict | None = None
+
+    for data in messages:
+        if "message" not in data:
+            continue
+        msg = data["message"]
+        role = msg.get("role")
+        if not role:
+            continue
+
+        if _is_real_user_message(data):
+            current = {"user": data, "items": []}
+            turns.append(current)
+        elif current is not None:
+            current["items"].append(data)
+        # else: messages before the first real user message are dropped
+
+    return turns
+
+
+def _render_assistant_section(items: list[dict], lines: list[str]) -> None:
+    """Render the assistant portion of a turn with tool grouping."""
+    # Flatten content blocks across all items, paired with source message data
+    blocks: list[tuple[str, dict, dict]] = []  # (block_type, block, message_data)
+    for data in items:
+        msg = data["message"]
+        role = msg.get("role")
+        content = msg.get("content")
+        if not isinstance(content, list):
+            continue
+        for block in content:
+            if not isinstance(block, dict):
+                continue
+            btype = block.get("type", "")
+            if btype in ("thinking", "text", "tool_use", "tool_result"):
+                blocks.append((btype, block, data))
+
+    # Walk blocks, grouping consecutive tool_use+tool_result into tool groups
+    i = 0
+    pending_tool_uses: list[tuple[dict, str | None]] = []
+
+    def flush_tools():
+        nonlocal pending_tool_uses
+        if pending_tool_uses:
+            _render_tool_group(pending_tool_uses, lines)
+            pending_tool_uses = []
+
+    while i < len(blocks):
+        btype, block, data = blocks[i]
+
+        if btype == "tool_use":
+            # Look ahead for a matching tool_result
+            result_text = None
+            if i + 1 < len(blocks) and blocks[i + 1][0] == "tool_result":
+                result_block = blocks[i + 1][1]
+                raw = result_block.get("content", "")
+                result_text = raw if isinstance(raw, str) else str(raw)
+                i += 2
+            else:
+                i += 1
+            pending_tool_uses.append((block, result_text))
+        elif btype == "tool_result":
+            # Orphan tool_result (no preceding tool_use) – skip
+            i += 1
+        elif btype == "thinking":
+            flush_tools()
+            thinking_text = block.get("thinking", "")
+            fence = _backtick_fence(thinking_text)
+            lines.append("")
+            lines.append("<details>")
+            lines.append(
+                "<summary>Internal Reasoning (click to expand)</summary>"
+            )
+            lines.append("")
+            lines.append(fence)
+            lines.append(thinking_text)
+            lines.append(fence)
+            lines.append("</details>")
+            lines.append("")
+            i += 1
+        elif btype == "text":
+            flush_tools()
+            text = block.get("text", "")
+            if text.strip():
+                lines.append(text)
+                lines.append("")
+            i += 1
+        else:
+            i += 1
+
+    flush_tools()
 
 
 def generate_rendered_markdown(
     messages: list[dict], metadata: SessionMetadata, manifest: Manifest
 ) -> str:
-    lines = []
+    lines: list[str] = []
 
     lines.append(f"# Claude Code Session: {manifest['export_name']}")
     lines.append("")
     lines.append(f"> Exported from cctrace v{CCTRACE_VERSION}")
     lines.append("")
 
+    # -- Session Info table --
     lines.append("## Session Info")
     lines.append("")
     lines.append("| Field | Value |")
@@ -667,6 +869,7 @@ def generate_rendered_markdown(
     lines.append(f"| Models | {', '.join(manifest['statistics']['models_used'])} |")
     lines.append("")
 
+    # -- Session Data table --
     lines.append("## Session Data")
     lines.append("")
     lines.append("| Component | Status |")
@@ -688,6 +891,7 @@ def generate_rendered_markdown(
     )
     lines.append("")
 
+    # -- Project Config table --
     lines.append("## Project Config")
     lines.append("")
     lines.append("| Component | Status |")
@@ -709,18 +913,34 @@ def generate_rendered_markdown(
     )
     lines.append("")
 
+    # -- Conversation (turn-based) --
     lines.append("---")
     lines.append("")
     lines.append("## Conversation")
     lines.append("")
 
-    for msg in messages:
-        formatted = format_message_markdown(msg)
-        if formatted:
-            lines.append(formatted)
+    turns = _group_into_turns(messages)
+
+    for turn_num, turn in enumerate(turns, 1):
+        lines.append(f"### Turn {turn_num}")
+        lines.append("")
+
+        # User section
+        lines.append("#### User")
+        lines.append("")
+        user_text = _extract_user_text(turn["user"])
+        if user_text.strip():
+            lines.append(user_text)
             lines.append("")
-            lines.append("---")
+
+        # Assistant section
+        if turn["items"]:
+            lines.append("#### Assistant")
             lines.append("")
+            _render_assistant_section(turn["items"], lines)
+
+        lines.append("---")
+        lines.append("")
 
     return "\n".join(lines)
 
