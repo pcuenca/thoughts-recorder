@@ -144,6 +144,20 @@ def parse_jsonl_file(file_path: Path) -> tuple[list[dict], SessionMetadata]:
     return messages, metadata
 
 
+def _backtick_fence(text: str) -> str:
+    """Return a backtick fence longer than any backtick run in *text*."""
+    longest = 0
+    run = 0
+    for ch in text:
+        if ch == "`":
+            run += 1
+            if run > longest:
+                longest = run
+        else:
+            run = 0
+    return "`" * max(3, longest + 1)
+
+
 def format_message_markdown(message_data: dict) -> str:
     output = []
 
@@ -176,36 +190,40 @@ def format_message_markdown(message_data: dict) -> str:
                         output.append(content.get("text", ""))
 
                     elif content_type == "thinking":
+                        thinking_text = content.get("thinking", "")
+                        fence = _backtick_fence(thinking_text)
                         output.append("\n<details>")
                         output.append(
                             "<summary>Internal Reasoning (click to expand)</summary>\n"
                         )
-                        output.append("```")
-                        output.append(content.get("thinking", ""))
-                        output.append("```")
+                        output.append(fence)
+                        output.append(thinking_text)
+                        output.append(fence)
                         output.append("</details>\n")
 
                     elif content_type == "tool_use":
                         tool_name = content.get("name", "unknown")
                         tool_id = content.get("id", "")
+                        tool_json = json.dumps(content.get("input", {}), indent=2)
+                        fence = _backtick_fence(tool_json)
                         output.append(f"\n**Tool Use: {tool_name}** (ID: {tool_id})")
-                        output.append("```json")
-                        output.append(json.dumps(content.get("input", {}), indent=2))
-                        output.append("```\n")
+                        output.append(f"{fence}json")
+                        output.append(tool_json)
+                        output.append(f"{fence}\n")
 
                     elif content_type == "tool_result":
-                        output.append("\n**Tool Result:**")
-                        output.append("```")
                         result = content.get("content", "")
                         if isinstance(result, str):
-                            output.append(result[:5000])
+                            result_text = result[:5000]
                             if len(result) > 5000:
-                                output.append(
-                                    f"\n... (truncated, {len(result) - 5000} chars omitted)"
-                                )
+                                result_text += f"\n... (truncated, {len(result) - 5000} chars omitted)"
                         else:
-                            output.append(str(result))
-                        output.append("```\n")
+                            result_text = str(result)
+                        fence = _backtick_fence(result_text)
+                        output.append("\n**Tool Result:**")
+                        output.append(fence)
+                        output.append(result_text)
+                        output.append(f"{fence}\n")
 
     return "\n".join(output)
 
