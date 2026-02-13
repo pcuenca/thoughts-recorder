@@ -9,6 +9,11 @@ Features I added with Claude Code:
 - [x] Fix nested fences inside thinking blocks.
 - [x] Turn-based format. We group assistant responses so first level items are the actual user instructions and the model responses. Previously, tool calls and agentic actions appeared inside "User" turns and it was harder to follow the conversation.
 
-To Do:
-- [ ] How to run with uvx.
+## How to Use
+
+```
+uv run https://raw.githubusercontent.com/pcuenca/thoughts-recorder/refs/heads/main/utils/export-cc-trace.py --help
+```
+
+To Do
 - [ ] Package as a Skill.
