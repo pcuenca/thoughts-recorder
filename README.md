@@ -16,4 +16,4 @@ uv run https://raw.githubusercontent.com/pcuenca/thoughts-recorder/refs/heads/ma
 ```
 
 To Do
-- [ ] Package as a Skill.
+- [x] ~~Package as a Skill~~. On second thought, `uv run` is fine. Not everything needs to be a Skill.
