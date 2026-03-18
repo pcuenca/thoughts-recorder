@@ -1249,8 +1249,8 @@ def main() -> int:
     parser.add_argument(
         "--format",
         choices=["md", "xml", "all"],
-        default="all",
-        help="Output format (default: all)",
+        default="md",
+        help="Output format (default: md)",
     )
     parser.add_argument(
         "--export-name",
